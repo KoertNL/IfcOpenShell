@@ -124,7 +124,7 @@ class MaterialCreator():
                 material_to_slot[i] = slots.index(material)
 
         if len(mesh.polygons) == len(mesh['ios_material_ids']):
-            material_index = [(material_to_slot[mat_id] if mat_id != 999999
+            material_index = [(material_to_slot[mat_id] if mat_id != -1
                 else 0) for mat_id in mesh['ios_material_ids']]
             mesh.polygons.foreach_set('material_index', material_index)
 
@@ -303,6 +303,10 @@ class IfcImporter():
             self.profile_code('Set vendor worksarounds')
         self.calculate_unit_scale()
         self.profile_code('Calculate unit scale')
+        self.filter_ifc()
+        self.profile_code('Filtering ifc')
+        self.patch_ifc()
+        self.profile_code('Patching ifc')
         self.set_units()
         self.profile_code('Set units')
         self.create_geometric_representation_contexts()
@@ -333,10 +337,6 @@ class IfcImporter():
         if self.ifc_import_settings.should_import_native:
             self.parse_native_elements()
             self.profile_code('Parsing native elements')
-        self.filter_ifc()
-        self.profile_code('Filtering ifc')
-        self.patch_ifc()
-        self.profile_code('Patching ifc')
         self.create_georeferencing()
         self.profile_code('Georeferencing ifc')
         self.create_groups()
@@ -561,6 +561,28 @@ class IfcImporter():
                 point.Coordinates[1] - offset_point[1],
                 point.Coordinates[2] - offset_point[2]
             )
+        if not offset_point:
+            return
+        if self.file.wrapped_data.schema == 'IFC2X3':
+            properties = [
+                self.file.createIfcPropertySingleValue('Eastings', None,
+                    self.file.createIfcLengthMeasure(offset_point[0])),
+                self.file.createIfcPropertySingleValue('Northings', None,
+                    self.file.createIfcLengthMeasure(offset_point[1])),
+                self.file.createIfcPropertySingleValue('OrthogonalHeight', None,
+                    self.file.createIfcLengthMeasure(offset_point[2]))
+            ]
+            history = self.file.createIfcOwnerHistory()
+            pset = self.file.createIfcPropertySet(
+                ifcopenshell.guid.new(), history, 'EPset_MapConversion', None, properties)
+            self.file.createIfcRelDefinesByProperties(
+                ifcopenshell.guid.new(), history, None, None, self.file.by_type('IfcSite'), pset)
+        else:
+            # We don't have the full geolocation information, so we'll add what we can
+            scene = bpy.context.scene
+            scene.MapConversion.eastings = str(offset_point[0])
+            scene.MapConversion.northings = str(offset_point[1])
+            scene.MapConversion.orthogonal_height = str(offset_point[2])
 
     def find_decomposed_ifc_class(self, element, ifc_class):
         results = []
@@ -925,8 +947,8 @@ class IfcImporter():
                     self.merge_bmeshes(merged_bm, item['blender'])
                 # Magic string NULLMAT represents no material, unless this has a better approach
                 if materials[i] == 'NULLMAT':
-                    # Magic number 999999 represents no material, until this has a better approach
-                    material_ids += [999999] * total_polygons
+                    # Magic number -1 represents no material, until this has a better approach
+                    material_ids += [-1] * total_polygons
                 else:
                     material_ids += [i] * total_polygons
         if merged_curve:
@@ -1778,10 +1800,10 @@ class IfcImporter():
                 return representation.Items[0].MappingTarget
 
     def get_geometry_type(self, element):
+        tree = []
         if hasattr(element, 'Representation'):
             tree = self.file.traverse(element.Representation)
         elif hasattr(element, 'RepresentationMaps'):
-            tree = []
             for representation_map in element.RepresentationMaps:
                 tree.extend(self.file.traverse(representation_map))
         representations = [e for e in tree if e.is_a('IfcRepresentation') \
